@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whatsapp-hermes"
+version = "0.1.0"
+description = "Local WhatsApp CLI bridge for Hermes-style agents using WuzAPI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+whatsapp = "whatsapp_hermes.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["whatsapp_hermes*"]
+
+[tool.setuptools.package-data]
+whatsapp_hermes = ["prompts/*.md"]
