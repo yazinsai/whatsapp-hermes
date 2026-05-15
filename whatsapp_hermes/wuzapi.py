@@ -7,7 +7,9 @@ import binascii
 import hashlib
 import re
 import subprocess
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -77,34 +79,26 @@ class WuzAPIClient:
             path = "/" + path
         query = f"?{urllib.parse.urlencode(params)}" if params else ""
         url = self.base_url + path + query
-        command = [
-            "curl",
-            "-sS",
-            "--max-time",
-            str(timeout),
-            "-w",
-            "\n%{http_code}",
-            "-X",
-            method.upper(),
+        body_bytes = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(
             url,
-            "-H",
-            f"Token: {self.token}",
-            "-H",
-            "Content-Type: application/json",
-        ]
-        if payload is not None:
-            command.extend(["--data-binary", json.dumps(payload)])
+            data=body_bytes,
+            method=method.upper(),
+            headers={
+                "Token": self.token,
+                "Content-Type": "application/json",
+                "User-Agent": "curl/8.7.1",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise WuzAPIHTTPError(exc.code, body) from exc
+        except urllib.error.URLError as exc:
+            raise WuzAPIHTTPError(0, str(exc.reason).replace(self.token, "***")) from exc
 
-        result = subprocess.run(command, text=True, capture_output=True)
-        stdout = result.stdout or ""
-        stderr = (result.stderr or "").replace(self.token, "***")
-        if result.returncode != 0:
-            raise WuzAPIHTTPError(0, stderr or stdout)
-
-        body, status_text = split_curl_status(stdout)
-        status = int(status_text) if status_text.isdigit() else 0
-        if status >= 400 or status == 0:
-            raise WuzAPIHTTPError(status, body or stderr)
         if not body.strip():
             return {}
         try:

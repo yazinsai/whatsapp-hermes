@@ -4,12 +4,14 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 from io import StringIO
 from pathlib import Path
 
 from whatsapp_hermes import cli
 from whatsapp_hermes.db import Store
 from whatsapp_hermes.normalize import extract_attachments, message_identity, normalize_phone
+from whatsapp_hermes.wuzapi import WuzAPIClient
 
 
 class CliHelpTests(unittest.TestCase):
@@ -110,6 +112,22 @@ class CliHelpTests(unittest.TestCase):
         self.assertIn("usage: whatsapp facts add", output)
         self.assertIn("--type", output)
         self.assertIn("--value", output)
+
+
+class WuzAPIClientTests(unittest.TestCase):
+    def test_request_does_not_spawn_curl_subprocesses(self) -> None:
+        client = WuzAPIClient(base_url="https://wuzapi.example.com", token="token")
+
+        with patch("whatsapp_hermes.wuzapi.subprocess.run") as run:
+            with patch("urllib.request.urlopen") as urlopen:
+                response = urlopen.return_value.__enter__.return_value
+                response.status = 200
+                response.read.return_value = b'{"ok": true}'
+
+                result = client.request("GET", "/health", params={"limit": 1})
+
+        self.assertEqual(result, {"ok": True})
+        run.assert_not_called()
 
 
 class NormalizeTests(unittest.TestCase):
