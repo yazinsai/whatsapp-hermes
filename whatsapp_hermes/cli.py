@@ -8,6 +8,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from .attachment_text import extract_pdf_text
 from .db import DEFAULT_DB_PATH, Store
 from .normalize import normalize_phone
 from .wuzapi import WuzAPIClient, default_env_path, load_dotenv
@@ -137,12 +138,27 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--json", action="store_true")
     check.add_argument("--limit", type=int, default=1000)
     check.add_argument("--workers", type=int, default=8)
+    check.add_argument(
+        "--no-download-attachments",
+        action="store_true",
+        help="Do not download pending inbound media attachments during check",
+    )
 
     sync = sub.add_parser("sync", help="Pull new messages from WuzAPI history endpoints")
     sync.add_argument("--json", action="store_true")
     sync.add_argument("--limit", type=int, default=1000)
     sync.add_argument("--endpoint", help="Override WuzAPI history endpoint path")
     sync.add_argument("--workers", type=int, default=8)
+    sync.add_argument(
+        "--download-attachments",
+        action="store_true",
+        help="Download pending inbound media attachments after syncing",
+    )
+    sync.add_argument(
+        "--no-download-attachments",
+        action="store_true",
+        help="Leave media attachments pending after syncing",
+    )
 
     unread = sub.add_parser("unread", help="Show unprocessed inbound messages")
     unread.add_argument("--json", action="store_true")
@@ -284,7 +300,12 @@ def print_facts_help(values: list[str]) -> int:
 
 
 def cmd_check(args: argparse.Namespace, store: Store) -> int:
-    sync_details = run_sync(store, limit=args.limit, workers=args.workers)
+    sync_details = run_sync(
+        store,
+        limit=args.limit,
+        workers=args.workers,
+        download_attachments=not args.no_download_attachments,
+    )
     groups = store.unread_groups()
     summaries = []
     for group in groups:
@@ -307,6 +328,7 @@ def cmd_check(args: argparse.Namespace, store: Store) -> int:
         "sync": {
             "fetched": sync_details["fetched"],
             "upserted": sync_details["upserted"],
+            "attachments": sync_details["attachments"],
         },
     }
     if args.json:
@@ -321,7 +343,13 @@ def cmd_check(args: argparse.Namespace, store: Store) -> int:
 
 
 def cmd_sync(args: argparse.Namespace, store: Store) -> int:
-    details = run_sync(store, limit=args.limit, endpoint=args.endpoint, workers=args.workers)
+    details = run_sync(
+        store,
+        limit=args.limit,
+        endpoint=args.endpoint,
+        workers=args.workers,
+        download_attachments=args.download_attachments and not args.no_download_attachments,
+    )
     if args.json:
         print_json(details)
     else:
@@ -336,6 +364,7 @@ def run_sync(
     limit: int,
     endpoint: str | None = None,
     workers: int = 8,
+    download_attachments: bool = False,
 ) -> dict[str, Any]:
     run_id = store.start_run("sync")
     try:
@@ -349,9 +378,15 @@ def run_sync(
         for message in messages:
             if store.upsert_message(message):
                 inserted += 1
+        attachment_details = (
+            download_pending_attachments(store, client)
+            if download_attachments
+            else {"attempted": 0, "downloaded": 0, "failed": 0}
+        )
         details = {
             "fetched": len(messages),
             "upserted": inserted,
+            "attachments": attachment_details,
             "endpoints": [result.__dict__ for result in endpoint_results],
         }
         store.finish_run(run_id, "ok", details)
@@ -359,6 +394,40 @@ def run_sync(
     except Exception as exc:
         store.finish_run(run_id, "error", error=str(exc))
         raise
+
+
+def download_pending_attachments(store: Store, client: WuzAPIClient) -> dict[str, int]:
+    attempted = downloaded = failed = 0
+    for attachment in store.pending_attachments(inbound_only=True):
+        attempted += 1
+        try:
+            result = client.download_media(attachment)
+            text = ""
+            error = None
+            if is_pdf_attachment(attachment, result["local_path"]):
+                try:
+                    text = extract_pdf_text(result["local_path"])
+                except Exception as exc:
+                    error = str(exc)
+            store.update_attachment(
+                attachment["id"],
+                status="ready",
+                local_path=result["local_path"],
+                size_bytes=result["size_bytes"],
+                sha256=result["sha256"],
+                text=text,
+                error=error,
+            )
+            downloaded += 1
+        except Exception as exc:
+            store.update_attachment(attachment["id"], status="error", error=str(exc))
+            failed += 1
+    return {"attempted": attempted, "downloaded": downloaded, "failed": failed}
+
+
+def is_pdf_attachment(attachment: dict[str, Any], local_path: str) -> bool:
+    mime_type = str(attachment.get("mime_type") or "").split(";", 1)[0].lower()
+    return mime_type == "application/pdf" or local_path.lower().endswith(".pdf")
 
 
 def cmd_unread(args: argparse.Namespace, store: Store) -> int:

@@ -111,7 +111,7 @@ The prompt is intentionally bossy. It tells the agent to read the thread before 
 
 ```bash
 whatsapp check --json
-whatsapp sync
+whatsapp sync --download-attachments
 whatsapp unread --json
 whatsapp thread <phone> --json --limit 100
 whatsapp contact <phone> --json
@@ -122,7 +122,7 @@ whatsapp mark-read <message_id>
 whatsapp mark-read --all
 ```
 
-`check` is the cron-friendly entrypoint. It syncs new WuzAPI history, groups unprocessed inbound messages, and returns JSON:
+`check` is the cron-friendly entrypoint. It syncs new WuzAPI history, downloads pending inbound PDF/image attachments, groups unprocessed inbound messages, and returns JSON:
 
 ```bash
 whatsapp check --json
@@ -140,20 +140,37 @@ Example response shape:
     {
       "phone": "15551234567",
       "unread_count": 2,
+      "latest_message": {
+        "id": "ABC",
+        "text": "please review",
+        "attachments": [
+          {
+            "kind": "document",
+            "mime_type": "application/pdf",
+            "filename": "invoice.pdf",
+            "local_path": "/Users/me/.hermes/attachments/15551234567/ABC/invoice.pdf",
+            "text": "Extracted PDF text...",
+            "status": "ready"
+          }
+        ]
+      },
       "thread_command": "~/.hermes/bin/whatsapp thread 15551234567 --json --limit 100"
     }
   ]
 }
 ```
 
+Attachments are stored locally under `~/.hermes/attachments/<phone>/<message_id>/`. PDFs get bounded text extraction in `attachments[].text`; images keep a local path for vision-capable agents to inspect.
+
 ## Typical Cron Flow
 
 1. Run `whatsapp check --json`.
 2. If there are unread groups, inspect each with `whatsapp thread <phone> --json --limit 100`.
-3. Read or update contact metadata with `whatsapp contact <phone> --json` and `whatsapp contact set ...`.
-4. Add durable facts with `whatsapp facts add ...`.
-5. Reply only when appropriate with `whatsapp send <phone> "..."`.
-6. Mark handled messages with `whatsapp mark-read <message_id>`.
+3. Read `attachments[].text` for PDFs and inspect `attachments[].local_path` for images/PDF originals when relevant.
+4. Read or update contact metadata with `whatsapp contact <phone> --json` and `whatsapp contact set ...`.
+5. Add durable facts with `whatsapp facts add ...`.
+6. Reply only when appropriate with `whatsapp send <phone> "..."`.
+7. Mark handled messages with `whatsapp mark-read <message_id>`.
 
 That gives your agent enough context to be useful, and enough friction to avoid becoming a cursed autoresponder.
 

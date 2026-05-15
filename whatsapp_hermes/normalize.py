@@ -98,6 +98,109 @@ def extract_text(payload: dict[str, Any]) -> str:
     return ""
 
 
+def extract_attachments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    event_payload = payload.get("event") if isinstance(payload.get("event"), dict) else payload
+    identity = message_identity(payload)
+    attachments: list[dict[str, Any]] = []
+
+    media_candidates = [
+        ("image", get_path(event_payload, "Message.imageMessage", "RawMessage.imageMessage")),
+        ("document", get_path(event_payload, "Message.documentMessage", "RawMessage.documentMessage")),
+    ]
+
+    for kind, media in media_candidates:
+        if not isinstance(media, dict):
+            continue
+        attachments.append(build_attachment_descriptor(payload, media, kind, identity, len(attachments)))
+
+    if payload is not event_payload:
+        for kind, media in [
+            ("image", get_path(payload, "Message.imageMessage", "RawMessage.imageMessage")),
+            ("document", get_path(payload, "Message.documentMessage", "RawMessage.documentMessage")),
+        ]:
+            if not isinstance(media, dict):
+                continue
+            descriptor = build_attachment_descriptor(payload, media, kind, identity, len(attachments))
+            if descriptor["id"] not in {item["id"] for item in attachments}:
+                attachments.append(descriptor)
+
+    webhook_base64 = payload.get("base64")
+    webhook_s3 = payload.get("s3")
+    if (webhook_base64 or webhook_s3) and not attachments:
+        mime_type = str(payload.get("mimeType") or payload.get("mimetype") or "")
+        kind = "document"
+        if mime_type.startswith("image/"):
+            kind = "image"
+        attachments.append(
+            {
+                "id": f"{identity['id']}:0",
+                "message_id": identity["id"],
+                "kind": kind,
+                "mime_type": mime_type,
+                "filename": str(payload.get("fileName") or payload.get("filename") or ""),
+                "caption": identity["text"],
+                "file_length": None,
+                "download": {},
+                "base64": webhook_base64 if isinstance(webhook_base64, str) else None,
+                "s3": webhook_s3 if isinstance(webhook_s3, dict) else None,
+                "raw": {"base64": bool(webhook_base64), "s3": webhook_s3},
+            }
+        )
+
+    return attachments
+
+
+def build_attachment_descriptor(
+    payload: dict[str, Any],
+    media: dict[str, Any],
+    kind: str,
+    identity: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
+    mime_type = str(
+        get_path(media, "mimetype", "Mimetype", "mimeType", "MimeType")
+        or ("image/jpeg" if kind == "image" else "application/octet-stream")
+    )
+    filename = str(
+        get_path(media, "fileName", "filename", "FileName", "title", "Title")
+        or default_attachment_filename(identity["id"], index, kind, mime_type)
+    )
+    caption = str(get_path(media, "caption", "Caption") or "")
+    download = {
+        "Url": get_path(media, "url", "URL", "Url"),
+        "Mimetype": mime_type,
+        "FileSHA256": get_path(media, "fileSHA256", "FileSHA256", "fileSha256"),
+        "FileLength": get_path(media, "fileLength", "FileLength", "fileSize"),
+        "MediaKey": get_path(media, "mediaKey", "MediaKey"),
+        "FileEncSHA256": get_path(media, "fileEncSHA256", "FileEncSHA256", "fileEncSha256"),
+    }
+    return {
+        "id": f"{identity['id']}:{index}",
+        "message_id": identity["id"],
+        "kind": kind,
+        "mime_type": mime_type,
+        "filename": filename,
+        "caption": caption,
+        "file_length": download["FileLength"],
+        "download": {key: value for key, value in download.items() if value not in (None, "")},
+        "base64": payload.get("base64") if isinstance(payload.get("base64"), str) else None,
+        "s3": payload.get("s3") if isinstance(payload.get("s3"), dict) else None,
+        "raw": media,
+    }
+
+
+def default_attachment_filename(message_id: str, index: int, kind: str, mime_type: str) -> str:
+    extension_by_mime = {
+        "application/pdf": ".pdf",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    extension = extension_by_mime.get(mime_type.split(";", 1)[0].strip().lower(), "")
+    return f"{message_id}-{index}-{kind}{extension}"
+
+
 def message_identity(payload: dict[str, Any]) -> dict[str, Any]:
     event_payload = payload.get("event") if isinstance(payload.get("event"), dict) else payload
     info = get_path(event_payload, "Info", "data.Info", "Data.Info") or {}

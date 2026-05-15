@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import base64
+import binascii
+import hashlib
+import re
 import subprocess
 import urllib.parse
 import uuid
@@ -121,6 +125,52 @@ class WuzAPIClient:
             data.setdefault("client_message_id", message_id)
         return data if isinstance(data, dict) else {"data": data, "client_message_id": message_id}
 
+    def download_media(self, attachment: dict[str, Any], *, root: Path | None = None) -> dict[str, Any]:
+        root = root or HERMES_HOME / "attachments"
+        media_bytes = b""
+        mime_type = attachment.get("mime_type") or "application/octet-stream"
+
+        if attachment.get("base64"):
+            media_bytes, detected_mime = decode_base64_media(str(attachment["base64"]))
+            mime_type = detected_mime or mime_type
+        elif attachment.get("s3"):
+            media_bytes = fetch_s3_media(attachment["s3"])
+        else:
+            endpoint = {
+                "image": "/chat/downloadimage",
+                "document": "/chat/downloaddocument",
+                "video": "/chat/downloadvideo",
+                "audio": "/chat/downloadaudio",
+            }.get(str(attachment.get("kind")))
+            if not endpoint:
+                raise RuntimeError(f"unsupported attachment kind: {attachment.get('kind')}")
+            payload = dict(attachment.get("download") or {})
+            missing = [key for key in ("Url", "MediaKey", "Mimetype", "FileSHA256", "FileLength") if not payload.get(key)]
+            if missing:
+                raise RuntimeError(f"missing WuzAPI media fields: {', '.join(missing)}")
+            data = self.request("POST", endpoint, payload=payload, timeout=90)
+            media_value = extract_media_value(data)
+            media_bytes, detected_mime = decode_base64_media(media_value)
+            mime_type = detected_mime or mime_type
+
+        if not media_bytes:
+            raise RuntimeError("downloaded attachment was empty")
+
+        phone = safe_path_part(str(attachment.get("phone") or "unknown"))
+        message_id = safe_path_part(str(attachment.get("message_id") or attachment.get("id") or "message"))
+        filename = safe_filename(str(attachment.get("filename") or attachment.get("id") or "attachment"), mime_type)
+        directory = root / phone / message_id
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / filename
+        path.write_bytes(media_bytes)
+
+        return {
+            "local_path": str(path),
+            "size_bytes": len(media_bytes),
+            "sha256": hashlib.sha256(media_bytes).hexdigest(),
+            "mime_type": mime_type,
+        }
+
     def fetch_history(
         self,
         *,
@@ -225,3 +275,67 @@ def split_curl_status(output: str) -> tuple[str, str]:
         return "", output.strip()
     body, status = output.rsplit("\n", 1)
     return body, status.strip()
+
+
+def extract_media_value(data: Any) -> str:
+    if isinstance(data, str):
+        return data
+    if isinstance(data, dict):
+        for key in ("base64", "Base64", "media", "Media", "data", "Data", "raw"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                nested = extract_media_value(value)
+                if nested:
+                    return nested
+    return ""
+
+
+def decode_base64_media(value: str) -> tuple[bytes, str | None]:
+    text = value.strip()
+    mime_type = None
+    if text.startswith("data:"):
+        header, _, body = text.partition(",")
+        text = body
+        if ";base64" in header:
+            mime_type = header.removeprefix("data:").split(";", 1)[0] or None
+    try:
+        return base64.b64decode(text, validate=True), mime_type
+    except binascii.Error:
+        return base64.b64decode(text), mime_type
+
+
+def fetch_s3_media(s3: dict[str, Any]) -> bytes:
+    url = str(s3.get("url") or "")
+    key = str(s3.get("key") or "")
+    if key and url and not url.endswith(key):
+        url = f"{url.rstrip('/')}/{key.lstrip('/')}"
+    if not url:
+        raise RuntimeError("S3 media payload did not include a URL")
+    result = subprocess.run(
+        ["curl", "-sS", "--max-time", "90", "-L", url],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or b"failed to download S3 media").decode("utf-8", errors="replace"))
+    return result.stdout
+
+
+def safe_path_part(value: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return clean or "unknown"
+
+
+def safe_filename(filename: str, mime_type: str) -> str:
+    clean = safe_path_part(Path(filename).name)
+    if "." in clean:
+        return clean
+    extension_by_mime = {
+        "application/pdf": ".pdf",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    return clean + extension_by_mime.get(mime_type.split(";", 1)[0].lower(), "")

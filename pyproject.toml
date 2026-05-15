@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Local WhatsApp CLI bridge for Hermes-style agents using WuzAPI"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pypdf>=6"]
 
 [project.scripts]
 whatsapp = "whatsapp_hermes.cli:main"

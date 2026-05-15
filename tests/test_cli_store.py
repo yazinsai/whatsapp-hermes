@@ -9,7 +9,7 @@ from pathlib import Path
 
 from whatsapp_hermes import cli
 from whatsapp_hermes.db import Store
-from whatsapp_hermes.normalize import message_identity, normalize_phone
+from whatsapp_hermes.normalize import extract_attachments, message_identity, normalize_phone
 
 
 class CliHelpTests(unittest.TestCase):
@@ -150,6 +150,61 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(identity["phone"], "97336449025")
         self.assertEqual(identity["direction"], "outbound")
 
+    def test_extracts_wuzapi_document_attachment(self) -> None:
+        payload = {
+            "Info": {
+                "ID": "DOC1",
+                "Chat": "97333601374@s.whatsapp.net",
+                "Sender": "97333601374@s.whatsapp.net",
+                "IsFromMe": False,
+                "Timestamp": 1760000000,
+            },
+            "Message": {
+                "documentMessage": {
+                    "caption": "please review",
+                    "fileName": "invoice.pdf",
+                    "mimetype": "application/pdf",
+                    "URL": "https://mmg.whatsapp.net/d/f/file.enc",
+                    "mediaKey": "media-key",
+                    "fileSHA256": "file-sha",
+                    "fileEncSHA256": "enc-sha",
+                    "fileLength": 2039,
+                }
+            },
+        }
+
+        attachments = extract_attachments(payload)
+
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]["id"], "DOC1:0")
+        self.assertEqual(attachments[0]["kind"], "document")
+        self.assertEqual(attachments[0]["mime_type"], "application/pdf")
+        self.assertEqual(attachments[0]["filename"], "invoice.pdf")
+        self.assertEqual(attachments[0]["download"]["Url"], "https://mmg.whatsapp.net/d/f/file.enc")
+
+    def test_extracts_webhook_image_attachment(self) -> None:
+        payload = {
+            "event": {
+                "Info": {
+                    "ID": "IMG1",
+                    "Chat": "97333601374@s.whatsapp.net",
+                    "Sender": "97333601374@s.whatsapp.net",
+                    "IsFromMe": False,
+                    "Timestamp": 1760000000,
+                },
+                "Message": {},
+            },
+            "base64": "aGVsbG8=",
+            "mimeType": "image/png",
+            "fileName": "photo.png",
+        }
+
+        attachments = extract_attachments(payload)
+
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]["kind"], "image")
+        self.assertEqual(attachments[0]["base64"], "aGVsbG8=")
+
 
 class StoreTests(unittest.TestCase):
     def insert_inbound(
@@ -196,6 +251,87 @@ class StoreTests(unittest.TestCase):
 
             self.assertTrue(store.mark_read("MSG1"))
             self.assertEqual(store.unread_groups(), [])
+
+    def test_thread_includes_attachments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "whatsapp.db")
+            store.init()
+            store.upsert_message(
+                {
+                    "Info": {
+                        "ID": "DOC1",
+                        "Chat": "97333601374@s.whatsapp.net",
+                        "Sender": "97333601374@s.whatsapp.net",
+                        "PushName": "Mannan",
+                        "IsFromMe": False,
+                        "Timestamp": 1760000000,
+                    },
+                    "Message": {
+                        "documentMessage": {
+                            "caption": "please review",
+                            "fileName": "invoice.pdf",
+                            "mimetype": "application/pdf",
+                            "URL": "https://mmg.whatsapp.net/d/f/file.enc",
+                            "mediaKey": "media-key",
+                            "fileSHA256": "file-sha",
+                            "fileEncSHA256": "enc-sha",
+                            "fileLength": 2039,
+                        }
+                    },
+                }
+            )
+
+            thread = store.thread("97333601374", 100)
+
+            attachment = thread["messages"][0]["attachments"][0]
+            self.assertEqual(attachment["id"], "DOC1:0")
+            self.assertEqual(attachment["filename"], "invoice.pdf")
+            self.assertEqual(attachment["status"], "pending")
+
+    def test_download_pending_attachments_updates_store(self) -> None:
+        class FakeClient:
+            def download_media(self, attachment: dict[str, object]) -> dict[str, object]:
+                return {
+                    "local_path": "/tmp/photo.jpg",
+                    "size_bytes": 12,
+                    "sha256": "abc123",
+                    "mime_type": "image/jpeg",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "whatsapp.db")
+            store.init()
+            store.upsert_message(
+                {
+                    "Info": {
+                        "ID": "IMG1",
+                        "Chat": "97333601374@s.whatsapp.net",
+                        "Sender": "97333601374@s.whatsapp.net",
+                        "PushName": "Mannan",
+                        "IsFromMe": False,
+                        "Timestamp": 1760000000,
+                    },
+                    "Message": {
+                        "imageMessage": {
+                            "caption": "look",
+                            "mimetype": "image/jpeg",
+                            "URL": "https://mmg.whatsapp.net/d/f/image.enc",
+                            "mediaKey": "media-key",
+                            "fileSHA256": "file-sha",
+                            "fileEncSHA256": "enc-sha",
+                            "fileLength": 12,
+                        }
+                    },
+                }
+            )
+
+            details = cli.download_pending_attachments(store, FakeClient())  # type: ignore[arg-type]
+            thread = store.thread("97333601374", 100)
+            attachment = thread["messages"][0]["attachments"][0]
+
+            self.assertEqual(details, {"attempted": 1, "downloaded": 1, "failed": 0})
+            self.assertEqual(attachment["status"], "ready")
+            self.assertEqual(attachment["local_path"], "/tmp/photo.jpg")
 
     def test_mark_all_read_marks_every_unprocessed_inbound_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

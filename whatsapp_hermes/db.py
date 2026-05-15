@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .normalize import message_identity, normalize_phone, now_iso
+from .normalize import extract_attachments, message_identity, normalize_phone, now_iso
 
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
@@ -50,6 +50,33 @@ class Store:
 
                 CREATE INDEX IF NOT EXISTS idx_messages_phone_timestamp
                   ON messages(phone, timestamp);
+
+                CREATE TABLE IF NOT EXISTS attachments (
+                  id TEXT PRIMARY KEY,
+                  message_id TEXT NOT NULL,
+                  phone TEXT NOT NULL,
+                  kind TEXT NOT NULL,
+                  mime_type TEXT NOT NULL DEFAULT '',
+                  filename TEXT NOT NULL DEFAULT '',
+                  caption TEXT NOT NULL DEFAULT '',
+                  file_length INTEGER,
+                  local_path TEXT,
+                  size_bytes INTEGER,
+                  sha256 TEXT,
+                  text TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  error TEXT,
+                  download_json TEXT NOT NULL DEFAULT '{}',
+                  raw_json TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_attachments_message_id
+                  ON attachments(message_id);
+
+                CREATE INDEX IF NOT EXISTS idx_attachments_status
+                  ON attachments(status);
 
                 CREATE TABLE IF NOT EXISTS contacts (
                   phone TEXT PRIMARY KEY,
@@ -170,8 +197,54 @@ class Store:
                 ),
             )
             self.ensure_contact(identity["phone"], identity["sender_name"], db=db)
+            self.upsert_attachments(payload, identity["phone"], db=db)
             db.commit()
             return cur.rowcount > 0
+
+    def upsert_attachments(self, payload: dict[str, Any], phone: str, *, db: sqlite3.Connection) -> None:
+        now = now_iso()
+        for attachment in extract_attachments(payload):
+            db.execute(
+                """
+                INSERT INTO attachments (
+                  id, message_id, phone, kind, mime_type, filename, caption,
+                  file_length, download_json, raw_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  phone = excluded.phone,
+                  kind = excluded.kind,
+                  mime_type = excluded.mime_type,
+                  filename = excluded.filename,
+                  caption = excluded.caption,
+                  file_length = excluded.file_length,
+                  download_json = excluded.download_json,
+                  raw_json = excluded.raw_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    attachment["id"],
+                    attachment["message_id"],
+                    normalize_phone(phone),
+                    attachment["kind"],
+                    attachment["mime_type"],
+                    attachment["filename"],
+                    attachment["caption"],
+                    int(attachment["file_length"]) if str(attachment.get("file_length") or "").isdigit() else None,
+                    json.dumps(
+                        {
+                            "download": attachment.get("download") or {},
+                            "base64": attachment.get("base64"),
+                            "s3": attachment.get("s3"),
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    json.dumps(attachment.get("raw") or {}, ensure_ascii=False, default=str),
+                    now,
+                    now,
+                ),
+            )
 
     def record_outgoing(self, phone: str, message_id: str, text: str, raw: dict[str, Any]) -> None:
         payload = {
@@ -224,9 +297,10 @@ class Store:
                 ORDER BY timestamp ASC
                 """
             ).fetchall()
+            attachments = self.attachments_for_messages([row["id"] for row in rows], db=db)
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
-            item = row_to_message(row)
+            item = row_to_message(row, attachments.get(row["id"], []))
             key = item["phone"]
             group = groups.setdefault(
                 key,
@@ -252,7 +326,8 @@ class Store:
                 """,
                 (phone, limit),
             ).fetchall()
-        messages = [row_to_message(row) for row in reversed(rows)]
+            attachments = self.attachments_for_messages([row["id"] for row in rows], db=db)
+        messages = [row_to_message(row, attachments.get(row["id"], [])) for row in reversed(rows)]
         return {
             "contact": row_to_contact(contact) if contact else default_contact(phone),
             "facts": [row_to_fact(row) for row in facts],
@@ -354,8 +429,76 @@ class Store:
             db.commit()
             return cur.rowcount
 
+    def pending_attachments(self, *, inbound_only: bool = True) -> list[dict[str, Any]]:
+        direction_filter = "AND messages.direction = 'inbound'" if inbound_only else ""
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT attachments.*
+                FROM attachments
+                JOIN messages ON messages.id = attachments.message_id
+                WHERE attachments.status IN ('pending', 'error')
+                  AND messages.processed = 0
+                  {direction_filter}
+                ORDER BY messages.timestamp ASC, attachments.id ASC
+                """
+            ).fetchall()
+        return [row_to_attachment(row) for row in rows]
 
-def row_to_message(row: sqlite3.Row) -> dict[str, Any]:
+    def update_attachment(
+        self,
+        attachment_id: str,
+        *,
+        status: str,
+        local_path: str | None = None,
+        size_bytes: int | None = None,
+        sha256: str | None = None,
+        text: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE attachments
+                SET status = ?,
+                    local_path = COALESCE(?, local_path),
+                    size_bytes = COALESCE(?, size_bytes),
+                    sha256 = COALESCE(?, sha256),
+                    text = COALESCE(?, text),
+                    error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (status, local_path, size_bytes, sha256, text, error, now_iso(), attachment_id),
+            )
+            db.commit()
+
+    def attachments_for_messages(
+        self,
+        message_ids: list[str],
+        *,
+        db: sqlite3.Connection,
+    ) -> dict[str, list[dict[str, Any]]]:
+        if not message_ids:
+            return {}
+        placeholders = ",".join("?" for _ in message_ids)
+        rows = db.execute(
+            f"""
+            SELECT *
+            FROM attachments
+            WHERE message_id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            message_ids,
+        ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            item = row_to_attachment(row)
+            grouped.setdefault(item["message_id"], []).append(item)
+        return grouped
+
+
+def row_to_message(row: sqlite3.Row, attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "id": row["id"],
         "direction": row["direction"],
@@ -364,8 +507,35 @@ def row_to_message(row: sqlite3.Row) -> dict[str, Any]:
         "sender_name": row["sender_name"],
         "timestamp": row["timestamp"],
         "text": row["text"],
+        "attachments": attachments or [],
         "processed": bool(row["processed"]),
         "sent_via_cli": bool(row["sent_via_cli"]),
+    }
+
+
+def row_to_attachment(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        download = json.loads(row["download_json"] or "{}")
+    except json.JSONDecodeError:
+        download = {}
+    return {
+        "id": row["id"],
+        "message_id": row["message_id"],
+        "phone": row["phone"],
+        "kind": row["kind"],
+        "mime_type": row["mime_type"],
+        "filename": row["filename"],
+        "caption": row["caption"],
+        "file_length": row["file_length"],
+        "local_path": row["local_path"],
+        "size_bytes": row["size_bytes"],
+        "sha256": row["sha256"],
+        "text": row["text"],
+        "status": row["status"],
+        "error": row["error"],
+        "download": download.get("download") or {},
+        "base64": download.get("base64"),
+        "s3": download.get("s3"),
     }
 
 

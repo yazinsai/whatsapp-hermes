@@ -25,6 +25,11 @@ For each unread group:
 {{WHATSAPP_COMMAND}} contact <phone> --json
 ```
 
+When a message has `attachments`, read them before deciding:
+- PDFs expose bounded extracted text at `attachments[].text`; use the original `attachments[].local_path` when the extracted text is empty or ambiguous.
+- Images expose `attachments[].local_path`; inspect the image if its content could change the reply.
+- If an attachment has `status != "ready"`, mention that it could not be read instead of guessing.
+
 If the contact is unknown or stale, infer strict identity metadata from the thread and persist it before or alongside any reply:
 ```bash
 {{WHATSAPP_COMMAND}} contact set <phone> \
