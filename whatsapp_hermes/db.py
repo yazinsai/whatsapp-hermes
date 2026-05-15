@@ -438,7 +438,6 @@ class Store:
                 FROM attachments
                 JOIN messages ON messages.id = attachments.message_id
                 WHERE attachments.status IN ('pending', 'error')
-                  AND messages.processed = 0
                   {direction_filter}
                 ORDER BY messages.timestamp ASC, attachments.id ASC
                 """

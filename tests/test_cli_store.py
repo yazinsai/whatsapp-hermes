@@ -333,6 +333,51 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(attachment["status"], "ready")
             self.assertEqual(attachment["local_path"], "/tmp/photo.jpg")
 
+    def test_download_pending_attachments_includes_processed_messages(self) -> None:
+        class FakeClient:
+            def download_media(self, attachment: dict[str, object]) -> dict[str, object]:
+                return {
+                    "local_path": "/tmp/invoice.pdf",
+                    "size_bytes": 12,
+                    "sha256": "abc123",
+                    "mime_type": "application/pdf",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "whatsapp.db")
+            store.init()
+            store.upsert_message(
+                {
+                    "Info": {
+                        "ID": "DOC1",
+                        "Chat": "97333601374@s.whatsapp.net",
+                        "Sender": "97333601374@s.whatsapp.net",
+                        "PushName": "Mannan",
+                        "IsFromMe": False,
+                        "Timestamp": 1760000000,
+                    },
+                    "Message": {
+                        "documentMessage": {
+                            "fileName": "invoice.pdf",
+                            "mimetype": "application/pdf",
+                            "URL": "https://mmg.whatsapp.net/d/f/file.enc",
+                            "mediaKey": "media-key",
+                            "fileSHA256": "file-sha",
+                            "fileEncSHA256": "enc-sha",
+                            "fileLength": 12,
+                        }
+                    },
+                }
+            )
+            self.assertTrue(store.mark_read("DOC1"))
+
+            details = cli.download_pending_attachments(store, FakeClient())  # type: ignore[arg-type]
+            attachment = store.thread("97333601374", 100)["messages"][0]["attachments"][0]
+
+            self.assertEqual(details, {"attempted": 1, "downloaded": 1, "failed": 0})
+            self.assertEqual(attachment["status"], "ready")
+            self.assertEqual(attachment["local_path"], "/tmp/invoice.pdf")
+
     def test_mark_all_read_marks_every_unprocessed_inbound_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "whatsapp.db")
