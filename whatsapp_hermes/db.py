@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .normalize import extract_attachments, message_identity, normalize_phone, now_iso
 
@@ -23,8 +24,16 @@ class Store:
         db.row_factory = sqlite3.Row
         return db
 
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        db = self.connect()
+        try:
+            yield db
+        finally:
+            db.close()
+
     def init(self) -> None:
-        with self.connect() as db:
+        with self.connection() as db:
             db.executescript(
                 """
                 PRAGMA journal_mode = WAL;
@@ -118,7 +127,7 @@ class Store:
 
     def start_run(self, command: str) -> int:
         started = now_iso()
-        with self.connect() as db:
+        with self.connection() as db:
             cur = db.execute(
                 "INSERT INTO runs (command, started_at, status) VALUES (?, ?, 'running')",
                 (command, started),
@@ -133,7 +142,7 @@ class Store:
         details: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> None:
-        with self.connect() as db:
+        with self.connection() as db:
             db.execute(
                 """
                 UPDATE runs
@@ -160,7 +169,7 @@ class Store:
         default_processed = 1 if identity["direction"] == "outbound" else 0
         processed_value = default_processed if processed is None else processed
 
-        with self.connect() as db:
+        with self.connection() as db:
             cur = db.execute(
                 """
                 INSERT INTO messages (
@@ -289,7 +298,7 @@ class Store:
                 conn.close()
 
     def unread_groups(self) -> list[dict[str, Any]]:
-        with self.connect() as db:
+        with self.connection() as db:
             rows = db.execute(
                 """
                 SELECT * FROM messages
@@ -311,7 +320,7 @@ class Store:
 
     def thread(self, phone: str, limit: int) -> dict[str, Any]:
         phone = normalize_phone(phone)
-        with self.connect() as db:
+        with self.connection() as db:
             contact = db.execute("SELECT * FROM contacts WHERE phone = ?", (phone,)).fetchone()
             facts = db.execute(
                 "SELECT * FROM contact_facts WHERE phone = ? ORDER BY id ASC",
@@ -336,7 +345,7 @@ class Store:
 
     def contact(self, phone: str) -> dict[str, Any]:
         phone = normalize_phone(phone)
-        with self.connect() as db:
+        with self.connection() as db:
             row = db.execute("SELECT * FROM contacts WHERE phone = ?", (phone,)).fetchone()
             facts = db.execute(
                 "SELECT * FROM contact_facts WHERE phone = ? ORDER BY id ASC",
@@ -360,7 +369,7 @@ class Store:
             "needs_review",
         }
         clean_updates = {key: value for key, value in updates.items() if key in allowed and value is not None}
-        with self.connect() as db:
+        with self.connection() as db:
             current = db.execute(
                 "SELECT evidence_message_ids FROM contacts WHERE phone = ?",
                 (phone,),
@@ -390,7 +399,7 @@ class Store:
     ) -> dict[str, Any]:
         phone = normalize_phone(phone)
         self.ensure_contact(phone)
-        with self.connect() as db:
+        with self.connection() as db:
             db.execute(
                 """
                 INSERT OR IGNORE INTO contact_facts (
@@ -404,7 +413,7 @@ class Store:
         return self.contact(phone)
 
     def mark_read(self, message_id: str) -> bool:
-        with self.connect() as db:
+        with self.connection() as db:
             cur = db.execute(
                 """
                 UPDATE messages
@@ -417,7 +426,7 @@ class Store:
             return cur.rowcount > 0
 
     def mark_all_read(self) -> int:
-        with self.connect() as db:
+        with self.connection() as db:
             cur = db.execute(
                 """
                 UPDATE messages
@@ -431,7 +440,7 @@ class Store:
 
     def pending_attachments(self, *, inbound_only: bool = True) -> list[dict[str, Any]]:
         direction_filter = "AND messages.direction = 'inbound'" if inbound_only else ""
-        with self.connect() as db:
+        with self.connection() as db:
             rows = db.execute(
                 f"""
                 SELECT attachments.*
@@ -455,7 +464,7 @@ class Store:
         text: str | None = None,
         error: str | None = None,
     ) -> None:
-        with self.connect() as db:
+        with self.connection() as db:
             db.execute(
                 """
                 UPDATE attachments

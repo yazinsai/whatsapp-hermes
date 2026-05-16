@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -430,6 +431,20 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(stdout.getvalue()), {"marked": 2, "ok": True})
             self.assertEqual(store.unread_groups(), [])
+
+    def test_repeated_upserts_do_not_leak_database_file_descriptors(self) -> None:
+        if not Path("/dev/fd").exists():
+            self.skipTest("/dev/fd is required to count open descriptors")
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "whatsapp.db")
+            store.init()
+            before = len(os.listdir("/dev/fd"))
+
+            for i in range(150):
+                self.insert_inbound(store, f"MSG{i}", phone=f"9733360{i:04d}")
+
+            after = len(os.listdir("/dev/fd"))
+            self.assertLessEqual(after - before, 3)
 
 
 if __name__ == "__main__":
