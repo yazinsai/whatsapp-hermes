@@ -113,6 +113,15 @@ class CliHelpTests(unittest.TestCase):
         self.assertIn("--type", output)
         self.assertIn("--value", output)
 
+    def test_sync_defaults_to_low_worker_count(self) -> None:
+        parser = cli.build_parser()
+
+        check_args = parser.parse_args(["check"])
+        sync_args = parser.parse_args(["sync"])
+
+        self.assertLessEqual(check_args.workers, 2)
+        self.assertLessEqual(sync_args.workers, 2)
+
 
 class WuzAPIClientTests(unittest.TestCase):
     def test_request_does_not_spawn_curl_subprocesses(self) -> None:

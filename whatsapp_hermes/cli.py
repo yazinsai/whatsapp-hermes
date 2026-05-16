@@ -137,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check", help="Sync and show whether any inbound messages need handling")
     check.add_argument("--json", action="store_true")
     check.add_argument("--limit", type=int, default=1000)
-    check.add_argument("--workers", type=int, default=8)
+    check.add_argument("--workers", type=int, default=2)
     check.add_argument(
         "--no-download-attachments",
         action="store_true",
@@ -148,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--json", action="store_true")
     sync.add_argument("--limit", type=int, default=1000)
     sync.add_argument("--endpoint", help="Override WuzAPI history endpoint path")
-    sync.add_argument("--workers", type=int, default=8)
+    sync.add_argument("--workers", type=int, default=2)
     sync.add_argument(
         "--download-attachments",
         action="store_true",
